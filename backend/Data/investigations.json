@@ -1,0 +1,145 @@
+{
+  "investigations": [
+    {
+      "id": "ai-summary-feature",
+      "title": "The AI Summary Feature: Full Causal Chain",
+      "subtitle": "Reconstructed independently by IBM Bob from git history — then verified against NOTES.md.",
+      "stages": [
+        {
+          "id": "planned",
+          "phase": "Planned",
+          "icon": "search",
+          "commit": "8d9fb12 → 6f0a6ac",
+          "title": "Model selection & design decisions",
+          "summary": "Planning spanned two commits. Claude Haiku 4.5 was initially proposed, then replaced by Groq + Llama 3.3 70B Versatile once provider research was done.",
+          "detail": "8d9fb12 (Aug 2 00:26) first proposed the AI summary feature with Claude Haiku 4.5 as the model. 6f0a6ac (Aug 2 20:26) replaced that decision with Groq + Llama 3.3 70B — no credit card, no training-data clause, 1,000 free requests/day, fast inference. The design was intentionally lean: opt-in button, per-repo SQLite cache with 24h TTL, hard 50/day global cap, and a low max_tokens: 150 ceiling. The provider was explicitly treated as swappable — \"switching later is cheap, one function sends a prompt and gets text back, not a structural dependency.\""
+        },
+        {
+          "id": "built",
+          "phase": "Built",
+          "icon": "commit",
+          "commit": "59c28ff",
+          "title": "AI summary feature shipped",
+          "summary": "Two new SQLite tables, a new API endpoint, and a typewriter-reveal animation on the frontend.",
+          "detail": "Added ai_summary_cache and ai_usage tables. A POST /analyze/{owner}/{repo}/summary endpoint checks the cache, checks the daily cap, builds a structured prompt, and calls Groq's API with model: \"llama-3.3-70b-versatile\" and max_tokens: 150. This worked correctly — Llama 3.3 70B is a straightforward instruction-following model, so the full 150-token budget went to the answer."
+        },
+        {
+          "id": "broke",
+          "phase": "Broke",
+          "icon": "warning",
+          "commit": "b716075",
+          "title": "Groq deprecates the model — bug introduced silently",
+          "summary": "Groq announced llama-3.3-70b-versatile's shutdown. The one-line model swap to gpt-oss-120b silently introduced a bug.",
+          "detail": "The developer switched to openai/gpt-oss-120b (higher token ceiling, cheaper per token). But gpt-oss-120b is a reasoning model — unlike Llama, it generates an internal chain-of-thought phase before the visible answer. max_tokens: 150 caps the combined total of reasoning + answer tokens, not just the answer. The old budget was mostly consumed by silent internal reasoning, leaving almost nothing for the real output. Summaries began cutting off mid-sentence."
+        },
+        {
+          "id": "fixed",
+          "phase": "Fixed",
+          "icon": "fix",
+          "commit": "a4dcf34",
+          "title": "Parameter fix — and a confusing false negative",
+          "summary": "max_tokens → max_completion_tokens, plus reasoning_effort: \"low\". But the first retest showed the exact same truncated text.",
+          "detail": "The fix: max_tokens: 150 → max_completion_tokens: 300 (the correct parameter for this model per Groq's docs, scoped to the visible output only, not the combined reasoning + answer total), plus reasoning_effort: \"low\" to free up more budget for the answer. Immediately after deploying, a retest returned byte-for-byte identical truncated text — looking like the fix had failed. It hadn't. The 24h SQLite cache was serving the stale pre-fix summary. Temperature > 0 means a live call never returns identical text twice, so identical output on retry is a definitive cache-hit signal, not a regression."
+        },
+        {
+          "id": "verified",
+          "phase": "Verified",
+          "icon": "check",
+          "commit": "2b53a3d",
+          "title": "Resolution confirmed and documented",
+          "summary": "Locally: deleted cache.db and restarted. On Render: an ephemeral filesystem meant the redeploy itself wiped production's stale cache.",
+          "detail": "The developer documented the full root cause in NOTES.md, written as a post-mortem exactly 9 minutes after the fix commit (22:54 → 23:03). Confirmed working end-to-end afterward, not just assumed."
+        }
+      ],
+      "insight": {
+        "title": "What Bob found that the human notes didn't say",
+        "body": "NOTES.md describes swapping max_tokens for max_completion_tokens, but frames it only as \"the parameter Groq's docs use for this model\" — without explaining why the difference matters mechanically. Bob's independent analysis of the diffs surfaced the real distinction: on reasoning models, max_tokens is an ambiguous legacy parameter applied to the total token budget (reasoning + output), while max_completion_tokens is scoped exclusively to the visible completion. The fix wasn't just a rename — it changed which tokens the limit actually applies to. Additionally, the notes don't document that the model choice itself changed during planning: Claude Haiku 4.5 was the original proposal (8d9fb12) before Groq/Llama was decided (6f0a6ac)."
+      }
+    },
+    {
+      "id": "concurrency-rate-limiting",
+      "title": "Sequential to Concurrent: The API Calls Story",
+      "subtitle": "Reconstructed independently by IBM Bob from git history — then verified against NOTES.md.",
+      "stages": [
+        {
+          "id": "identified",
+          "phase": "Identified",
+          "icon": "search",
+          "commit": "1c89134",
+          "title": "Sequential calls, no protection",
+          "summary": "The endpoint made four GitHub API calls one after another using blocking requests.get(), with no caching — every search paid the full latency cost from scratch.",
+          "detail": "Each call blocked the thread until the previous one returned. On normal GitHub response times (200–500ms per call), total latency stacked up to 1–2+ seconds per search. The notes explicitly flagged this as \"noticeably slow\" and marked concurrency as a future fix, deprioritized below caching."
+        },
+        {
+          "id": "flagged",
+          "phase": "Flagged",
+          "icon": "warning",
+          "commit": "cc46ffc",
+          "title": "Rate-limit risk recognized before deployment",
+          "summary": "With no rate limiting on the API, a deployed public endpoint could be hammered and drain the shared GitHub token's 5,000 requests/hour ceiling for everyone.",
+          "detail": "The security checklist in cc46ffc (Aug 1 19:32) noted this wasn't urgent while running locally, but was a hard requirement before going public. The same concern was reiterated in 8d9fb12 (Aug 2 00:26) as part of a broader security and deployment note — the risk was flagged twice across two separate commits before it was fixed."
+        },
+        {
+          "id": "fixed",
+          "phase": "Fixed",
+          "icon": "fix",
+          "commit": "8a24baf",
+          "title": "Concurrency and rate limiting shipped together",
+          "summary": "requests swapped for httpx + asyncio.gather, with the repo-existence check kept deliberately sequential before the other four calls fire in parallel. slowapi added at 10 requests/minute per IP.",
+          "detail": "The repo info call stays sequential on purpose — a 404 here should abort immediately without wasting calls on contributors, languages, etc. for a repo that doesn't exist. Everything after that has no dependency on the others, so they run concurrently. The README check was also introduced brand new in this commit (not a pre-existing call made concurrent) to feed the health score's has_readme flag. The contributor-count parsing logic was extracted into a standalone helper as a mechanical consequence of the library swap from requests to httpx."
+        },
+        {
+          "id": "tradeoffs",
+          "phase": "Tradeoffs",
+          "icon": "check",
+          "commit": "8a24baf",
+          "title": "What the fix quietly introduced",
+          "summary": "Real gains in latency and protection — but also new, undocumented risks: blocking SQLite calls inside an async function, and all-or-nothing failure behavior.",
+          "detail": "Making analyze_repo async means the SQLite calls inside it are still synchronous and block the event loop during any DB operation — a latent bottleneck under concurrent load. Separately, asyncio.gather's default behavior means if any one of the four parallel calls throws a real network exception, all four results are lost together. The old sequential version at least preserved earlier results when a later call failed."
+        }
+      ],
+      "insight": {
+        "title": "Three things Bob found that the human notes didn't say",
+        "body": "First: the README API call was introduced brand new in this commit, not an existing call made concurrent — NOTES.md implied all four calls pre-existed. Second: wrapping the endpoint in async silently introduced blocking SQLite calls inside an async function, an architectural tension the notes never flag. Third: asyncio.gather's all-or-nothing failure semantics mean a single failed call now takes down the whole response, where the old sequential version degraded more gracefully."
+      }
+    },
+    {
+      "id": "pagination-trap",
+      "title": "Counting Contributors: The Pagination Trap",
+      "subtitle": "Reconstructed independently by IBM Bob from git history — then verified against NOTES.md.",
+      "stages": [
+        {
+          "id": "built",
+          "phase": "Built",
+          "icon": "commit",
+          "commit": "1c89134",
+          "title": "One-line count, silent limit",
+          "summary": "Contributor count implemented as a single len() call on the API response, with no query parameters passed.",
+          "detail": "GitHub's /contributors endpoint defaults to 30 results per page, first page only. For any repo with 30 or fewer contributors, len() gives the correct count. For anything larger — any popular open-source project — the count silently caps at 30, with no error or indication anything was wrong."
+        },
+        {
+          "id": "diagnosed",
+          "phase": "Diagnosed",
+          "icon": "warning",
+          "commit": "d96b91c",
+          "title": "Bug spotted before it ever failed",
+          "summary": "The bug was identified and written up 32 minutes after the original commit — before a fix existed, and before any test or user ever hit it. Originally filed in NOTES.md.txt, renamed to NOTES.md one minute later in 1946aa0.",
+          "detail": "The diagnosis reasoned from the API contract itself: GitHub paginates at 30/page by default, len() only sees page one, and a repo like facebook/react would almost certainly have far more than 30 contributors. This was caught by thinking through how the API behaves, not by observing a wrong number live. The file was committed with a .txt extension (d96b91c at 13:55) and immediately renamed to the correct .md extension in the very next commit (1946aa0 at 13:56)."
+        },
+        {
+          "id": "fixed",
+          "phase": "Fixed",
+          "icon": "fix",
+          "commit": "7915a76",
+          "title": "The Link header trick",
+          "summary": "Neither of the two fixes considered in the diagnosis was used. Instead: requesting per_page=1 forces GitHub's Link header to reveal the exact total in a single call.",
+          "detail": "GitHub's paginated responses include a Link header with a rel=\"last\" URL containing a page= number. Requesting per_page=1 makes that page number equal the exact total contributor count — one API call, minimal data, no need to paginate through everything. The fix also had to parse this correctly with urllib.parse, since a naive string split on \"page=\" would incorrectly match inside \"per_page=\" itself. Two fallback branches handle repos with 0 or 1 contributors, where GitHub omits the Link header entirely. The fix also quietly added anon=\"true\", which widens the count to include anonymous contributors — not mentioned in the notes."
+        }
+      ],
+      "insight": {
+        "title": "Two things Bob found that the human notes didn't say",
+        "body": "First: the notes describe parsing the Link header, but don't explain why per_page=1 specifically was chosen — it's a deliberate trick to force GitHub into revealing the total in one lightweight call, not just an arbitrary parameter. Second: the fix quietly added anon=\"true\" to the request, which tells GitHub to include anonymous contributors in the count. This changes what's actually being counted — without it, only contributors with a linked GitHub account are included. The notes don't mention this parameter at all, so whether it was intentional or incidental is unclear."
+      }
+    }
+  ]
+}
