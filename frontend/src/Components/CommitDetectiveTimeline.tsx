@@ -9,8 +9,7 @@ import TimelineLoadingState from "./TimelineLoadingState";
 import TimelineErrorState from "./TimelineErrorState";
 
 // Change this if your backend runs on a different host/port.
-const API_BASE = "http://localhost:8000";
-
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 export default function CommitDetectiveTimeline() {
   const [investigationList, setInvestigationList] = useState<InvestigationSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
